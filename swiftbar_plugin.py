@@ -38,10 +38,13 @@ LAUNCHER = REPO_DIR / "swiftbar-plugins" / "prdigest.1h.sh"
 PLUGIN_ID = "prdigest.1h.sh"  # unique id for swiftbar://refreshplugin
 TITLE_MAX = 60
 
-# Refetch when the cache is older than this (covers wake-from-sleep etc.).
-STALE_TTL = 300
-# On a user open, refetch unless we *just* fetched — also breaks any refresh loop.
-MENU_DEBOUNCE = 5
+# Refetch when the cached data is older than this (seconds). A render kicks a
+# background fetch past this age; below it, the data is "fresh enough" — which
+# also debounces the rapid re-renders SwiftBar fires while a menu is held open.
+REFRESH_TTL = 45
+# A fetch running longer than this is presumed dead (crashed child); its
+# in-flight marker is cleared so the spinner can never wedge permanently.
+MARKER_TTL = 60
 
 # Fake data for screenshots/docs — set PR_DIGEST_DEMO=1 to render without a
 # token or network call. Two of these count as "new" (see DEMO_SEEN).
@@ -125,6 +128,43 @@ def cache_age(cache: dict | None) -> float | None:
         return None
 
 
+# --- in-flight marker: the single source of truth for the spinner --------- #
+def marker_path() -> Path:
+    return state_dir() / "fetching"
+
+
+def set_marker() -> None:
+    try:
+        marker_path().write_text(datetime.now(timezone.utc).isoformat(),
+                                 encoding="utf-8")
+    except OSError:
+        pass
+
+
+def clear_marker() -> None:
+    try:
+        marker_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def is_fetching() -> bool:
+    """True only while a fetch is actually running. Self-heals if it dies."""
+    path = marker_path()
+    if not path.exists():
+        return False
+    try:
+        started = datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
+        age = (datetime.now(timezone.utc) - started).total_seconds()
+    except (ValueError, OSError):
+        clear_marker()
+        return False
+    if age > MARKER_TTL:  # presumed-dead fetch — clear so we can recover
+        clear_marker()
+        return False
+    return True
+
+
 # --------------------------------------------------------------------------- #
 # Fetching (network) — only ever runs in the detached --fetch child or on the
 # very first render when there's no cache yet.
@@ -139,6 +179,8 @@ def fetch_and_cache(trigger_redraw: bool) -> None:
         # Keep the last-good list; attach a one-line error so the menu can warn.
         prev = load_cache() or {}
         save_cache(prev.get("prs", []), error=str(exc).splitlines()[0])
+    finally:
+        clear_marker()  # fetch is over (success or fail) → spinner must stop
     if trigger_redraw:
         trigger_refresh()
 
@@ -279,6 +321,10 @@ def main() -> int:
         return 0
 
     if "--fetch" in args:
+        # Mark in-flight and redraw first, so manual "Refresh now" / "Retry"
+        # also show the spinner; fetch_and_cache clears the marker when done.
+        set_marker()
+        trigger_refresh()
         fetch_and_cache(trigger_redraw=True)
         return 0
 
@@ -298,17 +344,18 @@ def main() -> int:
     error = cache.get("error")
     age = cache_age(cache)
 
-    should_fetch = (
-        age is None
-        or age > STALE_TTL
-        or (reason == "MenuOpen" and age > MENU_DEBOUNCE)
-    )
-    if should_fetch:
+    # The spinner reflects exactly one thing: is a fetch running right now?
+    # We only start a new fetch when none is in flight and the data is stale.
+    # No dependence on SWIFTBAR_PLUGIN_REFRESH_REASON (it sticks at "MenuOpen"
+    # while the menu is held open, which previously re-armed the spinner).
+    fetching = is_fetching()
+    if not fetching and (age is None or age > REFRESH_TTL):
+        set_marker()
         kick_background_fetch()
+        fetching = True
 
-    spinner = should_fetch and reason == "MenuOpen"
     seen = load_seen()
-    render_menu(prs, seen, spinner=spinner, error=error)
+    render_menu(prs, seen, spinner=fetching, error=error)
 
     # Clear the "new" badge only after you've actually opened the menu.
     if reason == "MenuOpen":
