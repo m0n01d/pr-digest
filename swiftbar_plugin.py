@@ -28,10 +28,11 @@ import os
 import subprocess
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from gh_prs import DigestError, collect_prs, get_token, load_env
+from gh_prs import (DigestError, attach_comments, collect_prs, get_token,
+                    humanize, load_env)
 
 REPO_DIR = Path(__file__).resolve().parent
 LAUNCHER = REPO_DIR / "swiftbar-plugins" / "prdigest.1h.sh"
@@ -46,24 +47,45 @@ REFRESH_TTL = 45
 # in-flight marker is cleared so the spinner can never wedge permanently.
 MARKER_TTL = 60
 
-# Fake data for screenshots/docs — set PR_DIGEST_DEMO=1 to render without a
-# token or network call. Two of these count as "new" (see DEMO_SEEN).
-DEMO_PRS = [
-    {"repo": "acme/widgets", "number": 142, "author": "jdoe", "age_days": 2,
-     "title": "Fix flaky checkout total when the cart is empty",
-     "url": "https://github.com/acme/widgets/pull/142",
-     "updated_at": "2026-06-23T09:00:00Z"},
-    {"repo": "acme/widgets", "number": 137, "author": "rsmith", "age_days": 5,
-     "title": "Add dark mode to the settings page",
-     "url": "https://github.com/acme/widgets/pull/137",
-     "updated_at": "2026-06-18T12:00:00Z"},
-    {"repo": "acme/api", "number": 88, "author": "aturing", "age_days": 12,
-     "title": "Migrate auth callers to tokenizer v3",
-     "url": "https://github.com/acme/api/pull/88",
-     "updated_at": "2026-06-22T17:30:00Z"},
-]
-# #137 already seen, so only #142 and #88 light up as new.
-DEMO_SEEN = {"https://github.com/acme/widgets/pull/137": "2026-06-18T12:00:00Z"}
+def demo_data() -> tuple[list[dict], dict[str, str]]:
+    """Fake PRs + comments for screenshots/docs (PR_DIGEST_DEMO=1) — no token,
+    no network. Timestamps are relative to now so previews read '2h', '1d'."""
+    now = datetime.now(timezone.utc)
+
+    def ago(**kw) -> str:
+        return (now - timedelta(**kw)).isoformat()
+
+    prs = [
+        {"repo": "acme/widgets", "number": 142, "author": "jdoe", "age_days": 2,
+         "title": "Fix flaky checkout total when the cart is empty",
+         "url": "https://github.com/acme/widgets/pull/142",
+         "updated_at": ago(hours=2), "comment_count": 7, "comments": [
+            {"author": "dknight", "type": "reply", "created_at": ago(hours=2),
+             "html_url": "https://github.com/acme/widgets/pull/142#c1",
+             "body": "Can you rename this to total before we merge? Otherwise looks great."},
+            {"author": "mira", "type": "review", "created_at": ago(days=1),
+             "html_url": "https://github.com/acme/widgets/pull/142#c2",
+             "body": "Why not reuse the existing helper here?"}]},
+        {"repo": "acme/widgets", "number": 137, "author": "rsmith", "age_days": 5,
+         "title": "Add dark mode to the settings page",
+         "url": "https://github.com/acme/widgets/pull/137",
+         "updated_at": ago(days=5), "comment_count": 0, "comments": []},
+        {"repo": "acme/api", "number": 88, "author": "aturing", "age_days": 12,
+         "title": "Migrate auth callers to tokenizer v3",
+         "url": "https://github.com/acme/api/pull/88",
+         "updated_at": ago(hours=5), "comment_count": 3, "comments": [
+            {"author": "arancetto", "type": "review", "created_at": ago(hours=5),
+             "html_url": "https://github.com/acme/api/pull/88#c1",
+             "body": "LGTM, just a nit on the test name then I'll approve."},
+            {"author": "bptest", "type": "reply", "created_at": ago(days=1),
+             "html_url": "https://github.com/acme/api/pull/88#c2",
+             "body": "CI is green now."}]},
+    ]
+    for pr in prs:
+        pr["latest"] = pr["comments"][0] if pr["comments"] else None
+    # #137 already seen (calm); #142 & #88 have unread replies.
+    seen = {"https://github.com/acme/widgets/pull/137": ago(days=5)}
+    return prs, seen
 
 
 # --------------------------------------------------------------------------- #
@@ -88,7 +110,15 @@ def load_seen() -> dict[str, str]:
 
 
 def save_seen(prs: list[dict]) -> None:
-    seen = {pr["url"]: pr["updated_at"] for pr in prs}
+    # Store the newest signal per PR — its own updated_at OR its latest comment,
+    # whichever is later — so replies older than that read as "seen".
+    seen: dict[str, str] = {}
+    for pr in prs:
+        ts = pr.get("updated_at", "")
+        latest = pr.get("latest")
+        if latest and latest.get("created_at", "") > ts:
+            ts = latest["created_at"]
+        seen[pr["url"]] = ts
     try:
         (state_dir() / "seen.json").write_text(json.dumps(seen), encoding="utf-8")
     except OSError:
@@ -174,6 +204,7 @@ def fetch_and_cache(trigger_redraw: bool) -> None:
     try:
         token = get_token()
         prs = collect_prs(token)
+        attach_comments(token, prs)  # enrich with recent comments
         save_cache(prs, error=None)
     except DigestError as exc:
         # Keep the last-good list; attach a one-line error so the menu can warn.
@@ -234,7 +265,7 @@ def emit(text: str = "", **params: str) -> None:
 
 def render_menu(prs: list[dict], seen: dict[str, str], *, spinner: bool,
                 error: str | None) -> None:
-    new_prs = [pr for pr in prs if is_new(pr, seen)]
+    any_new = any(is_new(pr, seen) for pr in prs)
     count = len(prs)
 
     # --- menu bar title (single line) ---
@@ -244,7 +275,7 @@ def render_menu(prs: list[dict], seen: dict[str, str], *, spinner: bool,
         emit(sfimage="exclamationmark.triangle", sfcolor="orange")
     elif count == 0:
         emit(sfimage="checkmark.circle", sfcolor="green")
-    elif new_prs:
+    elif any_new:
         emit(str(count), sfimage="tray.full.fill", sfcolor="red")
     else:
         emit(str(count), sfimage="tray.full")
@@ -263,13 +294,6 @@ def render_menu(prs: list[dict], seen: dict[str, str], *, spinner: bool,
         emit("No PRs need your attention", color="#888888")
     elif count:
         emit(f"{count} PR(s) need your attention", color="#888888")
-
-        if new_prs:
-            print("---")
-            emit("🆕 New / updated", color="#888888")
-            for pr in sorted(new_prs, key=lambda p: p["age_days"], reverse=True):
-                pr_line(pr, new=True)
-
         by_repo: dict[str, list[dict]] = defaultdict(list)
         for pr in prs:
             by_repo[pr["repo"]].append(pr)
@@ -278,7 +302,7 @@ def render_menu(prs: list[dict], seen: dict[str, str], *, spinner: bool,
             repo_prs = by_repo[repo]
             emit(f"{repo}  ({len(repo_prs)})", color="#888888")
             for pr in sorted(repo_prs, key=lambda p: p["age_days"], reverse=True):
-                pr_line(pr, new=is_new(pr, seen))
+                pr_block(pr, seen)
 
     # --- footer actions ---
     print("---")
@@ -301,14 +325,49 @@ def cache_label() -> str:
         return "—"
 
 
-def pr_line(pr: dict, new: bool) -> None:
+def pr_block(pr: dict, seen: dict[str, str]) -> None:
+    """Version 3 'row summary': the PR row carries the latest replier + a
+    comment count badge + unread dot; up to 2 recent comments follow, then
+    '+n more' (or 'no replies yet')."""
+    seen_ts = seen.get(pr["url"], "")
+    comments = pr.get("comments", [])
+    count = pr.get("comment_count", 0)
+    latest = pr.get("latest")
     age = "today" if pr["age_days"] == 0 else f"{pr['age_days']}d"
-    title = truncate(sanitize(pr["title"]))
-    label = f"#{pr['number']}  {title}  ·  {pr['author']} · {age}"
-    if new:
-        emit(label, href=pr["url"], sfimage="circle.fill", sfcolor="red")
+
+    # --- the PR row ---
+    summary = ""
+    if latest:
+        summary = f"  ·  {latest['author']} {humanize(latest['created_at'])}"
+    label = f"#{pr['number']}  {truncate(sanitize(pr['title']), 44)}  ·  {pr['author']} · {age}{summary}"
+    params: dict[str, str] = {"href": pr["url"]}
+    if count:
+        params["badge"] = str(count)
+    if latest:
+        params["tooltip"] = sanitize(latest["body"])[:200]
+    if is_new(pr, seen):
+        params["sfimage"], params["sfcolor"] = "circle.fill", "red"
     else:
-        emit(label, href=pr["url"])
+        params["sfimage"], params["sfcolor"] = "circle", "#6b6b70"
+    emit(label, **params)
+
+    # --- up to 2 recent comments ---
+    for c in comments[:2]:
+        glyph = ("chevron.left.forwardslash.chevron.right"
+                 if c["type"] == "review" else "arrowshape.turn.up.left")
+        line = f"{c['author']}  {truncate(sanitize(c['body']), 46)} · {humanize(c['created_at'])}"
+        cp: dict[str, str] = {"href": c["html_url"], "sfimage": glyph,
+                              "tooltip": sanitize(c["body"])[:280]}
+        if c["created_at"] <= seen_ts:  # already seen → muted
+            cp["color"] = "#8b8b90"
+        emit(line, **cp)
+
+    # --- tail ---
+    if count > 2:
+        emit(f"+{count - 2} more on GitHub", href=pr["url"],
+             sfimage="arrow.up.right.square", color="#4aa3ff")
+    elif count == 0:
+        emit("no replies yet", color="#6b6b70")
 
 
 # --------------------------------------------------------------------------- #
@@ -317,7 +376,8 @@ def main() -> int:
     reason = os.environ.get("SWIFTBAR_PLUGIN_REFRESH_REASON", "")
 
     if os.environ.get("PR_DIGEST_DEMO"):
-        render_menu(DEMO_PRS, DEMO_SEEN, spinner="--spinner" in args, error=None)
+        demo_prs, demo_seen = demo_data()
+        render_menu(demo_prs, demo_seen, spinner="--spinner" in args, error=None)
         return 0
 
     if "--fetch" in args:

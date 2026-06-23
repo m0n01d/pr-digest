@@ -22,12 +22,13 @@ The icon at a glance:
 
 ## What it does
 
-Using the GitHub REST search API (`GET /search/issues`), it runs two queries:
+Using the GitHub REST search API (`GET /search/issues`), it runs three queries:
 
 - `is:open is:pr review-requested:@me` — PRs waiting on your review
 - `is:open is:pr assignee:@me` — PRs assigned to you
+- `is:open is:pr author:@me` — PRs you opened
 
-It de-duplicates across the two lists, prints a clean digest grouped by repo
+It de-duplicates across the lists, prints a clean digest grouped by repo
 (title, number, author, repo, age in days, URL) with a total count at the top,
 and also writes the same digest to a timestamped file in `./digests/`. If
 nothing's waiting, it prints `No PRs need your attention.`
@@ -121,14 +122,29 @@ fetch code in `gh_prs.py`.
 
 The red badge **persists through hourly refreshes** and clears once you **open
 the menu** (SwiftBar tells the plugin it was opened via
-`SWIFTBAR_PLUGIN_REFRESH_REASON=MenuOpen`). New/updated PRs are also listed in a
-`🆕 New / updated` section at the top and flagged with a red dot. There's a
-**Mark all as seen** item to clear the badge manually, and **Refresh now** to
-re-fetch on demand.
+`SWIFTBAR_PLUGIN_REFRESH_REASON=MenuOpen`). PRs with new activity carry a red dot
+in the list. There's a **Mark all as seen** item to clear the badge manually,
+and **Refresh now** to re-fetch on demand.
+
+### Comment previews
+
+Each PR row also previews its recent **comments** — conversation replies and
+inline review comments — so you can see who responded without opening GitHub:
+
+- The PR row shows the **latest replier + time** and a **comment-count badge**.
+- Up to **2** recent comments appear beneath it; review comments carry a code
+  glyph, replies a reply glyph. Click one to jump straight to that comment.
+- **+n more on GitHub** opens the PR's conversation tab; PRs with none show
+  *no replies yet*.
+- Unread comments (newer than your last look) render brighter; the full text is
+  on hover.
+
+Comments are fetched in the background per PR (`/issues/{n}/comments` +
+`/pulls/{n}/comments`) and cached, so the menu still opens instantly.
 
 State lives in `state/` (git-ignored): `seen.json` maps PR URL → last-seen
-`updated_at` (drives the badge), and `cache.json` holds the last fetched PR
-list so the menu can draw instantly.
+timestamp (drives the badge + unread comments), and `cache.json` holds the last
+fetched PRs **and their comments** so the menu can draw instantly.
 
 > The SwiftBar plugin handles the live view; it does **not** write to
 > `digests/`. The dated digest files stay the job of the CLI / launchd schedule

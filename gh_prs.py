@@ -27,6 +27,7 @@ ENV_PATH = REPO_DIR / ".env"
 QUERIES = {
     "Review requested": "is:open is:pr review-requested:@me",
     "Assigned to you": "is:open is:pr assignee:@me",
+    "Opened by you": "is:open is:pr author:@me",
 }
 
 
@@ -143,10 +144,91 @@ def normalize(item: dict) -> dict:
 
 
 def collect_prs(token: str) -> list[dict]:
-    """Run both searches and de-duplicate by PR URL."""
+    """Run every search and de-duplicate by PR URL."""
     by_url: dict[str, dict] = {}
     for query in QUERIES.values():
         for item in search_prs(query, token):
             pr = normalize(item)
             by_url.setdefault(pr["url"], pr)
     return list(by_url.values())
+
+
+def humanize(iso: str) -> str:
+    """Compact relative time from an ISO timestamp: 'just now', '5m', '2h', '3d'."""
+    if not iso:
+        return ""
+    try:
+        when = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    secs = (datetime.now(timezone.utc) - when).total_seconds()
+    if secs < 60:
+        return "just now"
+    mins = secs / 60
+    if mins < 60:
+        return f"{int(mins)}m"
+    if mins < 1440:
+        return f"{int(mins // 60)}h"
+    if mins < 10080:
+        return f"{int(mins // 1440)}d"
+    return f"{int(mins // 10080)}w"
+
+
+def _auth_headers(token: str) -> dict:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _get_list(url: str, token: str) -> list[dict]:
+    """GET a JSON array endpoint with the shared error handling."""
+    try:
+        resp = requests.get(url, headers=_auth_headers(token), timeout=TIMEOUT)
+    except requests.RequestException as exc:
+        raise DigestError(f"Network error talking to GitHub: {exc}") from exc
+    _raise_for_api_errors(resp)
+    payload = resp.json()
+    return payload if isinstance(payload, list) else []
+
+
+def _normalize_comment(item: dict, kind: str) -> dict:
+    return {
+        "author": (item.get("user") or {}).get("login", "unknown"),
+        "body": (item.get("body") or "").strip(),
+        "html_url": item.get("html_url", ""),
+        "created_at": item.get("created_at", ""),
+        "type": kind,  # "reply" (conversation) or "review" (inline code comment)
+    }
+
+
+def fetch_comments(token: str, repo: str, number: int) -> dict:
+    """Recent conversation replies + inline review comments for one PR.
+
+    Returns {"comments": <up to 5, newest first>, "count": <total fetched>}.
+    """
+    issues = _get_list(
+        f"{API_ROOT}/repos/{repo}/issues/{number}/comments?per_page=100", token)
+    reviews = _get_list(
+        f"{API_ROOT}/repos/{repo}/pulls/{number}/comments?per_page=100", token)
+    merged = (
+        [_normalize_comment(c, "reply") for c in issues]
+        + [_normalize_comment(c, "review") for c in reviews]
+    )
+    merged.sort(key=lambda c: c["created_at"], reverse=True)
+    return {"comments": merged[:5], "count": len(merged)}
+
+
+def attach_comments(token: str, prs: list[dict]) -> list[dict]:
+    """Enrich each PR in place with its recent comments. Per-PR errors are
+    swallowed so one bad PR can't blank the whole digest."""
+    for pr in prs:
+        try:
+            data = fetch_comments(token, pr["repo"], pr["number"])
+        except DigestError:
+            data = {"comments": [], "count": 0}
+        pr["comments"] = data["comments"]
+        pr["comment_count"] = data["count"]
+        pr["latest"] = data["comments"][0] if data["comments"] else None
+    return prs
