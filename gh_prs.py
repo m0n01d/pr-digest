@@ -143,14 +143,26 @@ def normalize(item: dict) -> dict:
     }
 
 
+def _only_orgs() -> set[str]:
+    """Restrict the digest to these repo owners, from PR_DIGEST_ONLY_ORGS
+    (comma-separated, case-insensitive). Empty = no restriction (show all)."""
+    raw = os.environ.get("PR_DIGEST_ONLY_ORGS", "")
+    return {x.strip().lower() for x in raw.split(",") if x.strip()}
+
+
 def collect_prs(token: str) -> list[dict]:
-    """Run every search and de-duplicate by PR URL."""
+    """Run every search and de-duplicate by PR URL. If PR_DIGEST_ONLY_ORGS is
+    set, keep only PRs whose repo owner is in that allowlist."""
     by_url: dict[str, dict] = {}
     for query in QUERIES.values():
         for item in search_prs(query, token):
             pr = normalize(item)
             by_url.setdefault(pr["url"], pr)
-    return list(by_url.values())
+    prs = list(by_url.values())
+    orgs = _only_orgs()
+    if orgs:
+        prs = [pr for pr in prs if pr["repo"].split("/", 1)[0].lower() in orgs]
+    return prs
 
 
 def humanize(iso: str) -> str:

@@ -33,6 +33,10 @@ It de-duplicates across the lists, prints a clean digest grouped by repo
 and also writes the same digest to a timestamped file in `./digests/`. If
 nothing's waiting, it prints `No PRs need your attention.`
 
+To scope the digest to one or more orgs (e.g. a work machine), set
+`PR_DIGEST_ONLY_ORGS` in `.env` to a comma-separated owner allowlist — PRs from
+other owners are dropped. Unset shows everything.
+
 ## Setup
 
 Requires Python 3.9+.
