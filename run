@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Wrapper for cron/launchd: activate the venv (if present) and run the digest.
+# Always resolves paths relative to this script so cron's cwd doesn't matter.
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+if [ -d ".venv" ]; then
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+fi
+
+exec python3 pr_digest.py

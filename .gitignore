@@ -1,0 +1,17 @@
+# Secrets — never commit your token
+.env
+
+# Generated digests
+digests/
+
+# SwiftBar plugin seen-state
+state/
+
+# Cron output
+cron.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
