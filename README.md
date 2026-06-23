@@ -138,6 +138,11 @@ inline review comments — so you can see who responded without opening GitHub:
   *no replies yet*.
 - Unread comments (newer than your last look) render brighter; the full text is
   on hover.
+- **Bots are filtered out** so the preview reflects who actually replied.
+  Accounts GitHub flags as `type=Bot` (including `*[bot]` and Copilot) are
+  skipped automatically; add named bot accounts via `PR_DIGEST_IGNORE_LOGINS`
+  in `.env` (comma-separated). PRs whose only activity is bots show *no replies
+  yet*.
 
 Comments are fetched in the background per PR (`/issues/{n}/comments` +
 `/pulls/{n}/comments`) and cached, so the menu still opens instantly.

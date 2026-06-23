@@ -193,6 +193,21 @@ def _get_list(url: str, token: str) -> list[dict]:
     return payload if isinstance(payload, list) else []
 
 
+def _ignored_logins() -> set[str]:
+    """Extra bot logins to skip, from PR_DIGEST_IGNORE_LOGINS (comma-separated).
+    For named bots that aren't flagged as type=Bot (e.g. a custom org bot)."""
+    raw = os.environ.get("PR_DIGEST_IGNORE_LOGINS", "")
+    return {x.strip().lower() for x in raw.split(",") if x.strip()}
+
+
+def _is_bot(user: dict, ignored: set[str]) -> bool:
+    user = user or {}
+    if user.get("type") == "Bot":  # GitHub's own flag (Copilot, *[bot], …)
+        return True
+    login = user.get("login", "").lower()
+    return login.endswith("[bot]") or login in ignored
+
+
 def _normalize_comment(item: dict, kind: str) -> dict:
     return {
         "author": (item.get("user") or {}).get("login", "unknown"),
@@ -204,18 +219,22 @@ def _normalize_comment(item: dict, kind: str) -> dict:
 
 
 def fetch_comments(token: str, repo: str, number: int) -> dict:
-    """Recent conversation replies + inline review comments for one PR.
+    """Recent human conversation replies + inline review comments for one PR.
+    Bot comments are filtered out so the preview reflects who actually replied.
 
-    Returns {"comments": <up to 5, newest first>, "count": <total fetched>}.
+    Returns {"comments": <up to 5, newest first>, "count": <human total>}.
     """
+    ignored = _ignored_logins()
     issues = _get_list(
         f"{API_ROOT}/repos/{repo}/issues/{number}/comments?per_page=100", token)
     reviews = _get_list(
         f"{API_ROOT}/repos/{repo}/pulls/{number}/comments?per_page=100", token)
-    merged = (
-        [_normalize_comment(c, "reply") for c in issues]
-        + [_normalize_comment(c, "review") for c in reviews]
-    )
+    merged = [
+        _normalize_comment(c, kind)
+        for items, kind in ((issues, "reply"), (reviews, "review"))
+        for c in items
+        if not _is_bot(c.get("user") or {}, ignored)
+    ]
     merged.sort(key=lambda c: c["created_at"], reverse=True)
     return {"comments": merged[:5], "count": len(merged)}
 
