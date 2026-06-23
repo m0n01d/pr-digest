@@ -86,8 +86,12 @@ For a glanceable view instead of a file, there's a [SwiftBar](https://swiftbar.a
 plugin. It puts an icon in your menu bar showing a **count** of PRs needing
 attention, a **red tray badge** when something is **new or has new activity**
 since you last looked, and a dropdown of the PRs grouped by repo as **clickable
-links**. It refreshes **hourly** in the background and **re-fetches the moment
-you open it**.
+links**.
+
+The menu **opens instantly** — it renders from a local cache, never blocking on
+the network. Opening it (and an **hourly** timer) kicks off a detached
+background fetch; the icon shows a **refresh spinner** while that runs, then the
+count and list update in place. So you get a snappy menu *and* fresh data.
 
 ```bash
 brew install --cask swiftbar
@@ -113,6 +117,7 @@ fetch code in `gh_prs.py`.
 | ✅ (green check) | No PRs need your attention. |
 | `3` 📥 | 3 PRs waiting; nothing new since you last opened the menu. |
 | `3` 📥 (red) | 3 PRs, and at least one is new or has fresh activity. |
+| `3` 🔄 (spinner) | Refreshing in the background — count and list stay visible. |
 
 The red badge **persists through hourly refreshes** and clears once you **open
 the menu** (SwiftBar tells the plugin it was opened via
@@ -121,8 +126,9 @@ the menu** (SwiftBar tells the plugin it was opened via
 **Mark all as seen** item to clear the badge manually, and **Refresh now** to
 re-fetch on demand.
 
-"Seen" state is stored in `state/seen.json` (git-ignored) as a map of PR URL →
-last-seen `updated_at`.
+State lives in `state/` (git-ignored): `seen.json` maps PR URL → last-seen
+`updated_at` (drives the badge), and `cache.json` holds the last fetched PR
+list so the menu can draw instantly.
 
 > The SwiftBar plugin handles the live view; it does **not** write to
 > `digests/`. The dated digest files stay the job of the CLI / launchd schedule

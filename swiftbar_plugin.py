@@ -7,27 +7,41 @@ Output follows the SwiftBar/xbar plugin protocol:
 
 Run by the launcher in swiftbar-plugins/prdigest.1h.sh (hourly + on open).
 
+Cache-first, so the menu opens instantly. A render reads the last-known PR list
+from a local cache and prints it immediately (no network), then — if the cache
+is stale or you just opened the menu — kicks a *detached* background fetch. That
+fetch updates the cache and pokes SwiftBar to redraw via its URL scheme, so the
+count/list refresh a beat later without ever blocking the menu. While a
+user-opened fetch is in flight the menu bar icon shows a refresh glyph; the
+count stays visible.
+
 The "new" indicator (a red tray badge) lights up when a PR is brand-new or has
 new activity (updated_at) since you last looked. It clears only when you
 actually open the menu — SwiftBar sets SWIFTBAR_PLUGIN_REFRESH_REASON=MenuOpen
-on click vs Schedule/Manual for the background timer — so a background refresh
-never silently dismisses it.
+on click vs Schedule/Manual for the background timer.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from gh_prs import DigestError, collect_prs, get_token, load_env
 
 REPO_DIR = Path(__file__).resolve().parent
 LAUNCHER = REPO_DIR / "swiftbar-plugins" / "prdigest.1h.sh"
+PLUGIN_ID = "prdigest.1h.sh"  # unique id for swiftbar://refreshplugin
 TITLE_MAX = 60
+
+# Refetch when the cache is older than this (covers wake-from-sleep etc.).
+STALE_TTL = 300
+# On a user open, refetch unless we *just* fetched — also breaks any refresh loop.
+MENU_DEBOUNCE = 5
 
 # Fake data for screenshots/docs — set PR_DIGEST_DEMO=1 to render without a
 # token or network call. Two of these count as "new" (see DEMO_SEEN).
@@ -49,16 +63,18 @@ DEMO_PRS = [
 DEMO_SEEN = {"https://github.com/acme/widgets/pull/137": "2026-06-18T12:00:00Z"}
 
 
-def state_path() -> Path:
-    """Where seen-state lives: SwiftBar's per-plugin data dir, else ./state."""
+# --------------------------------------------------------------------------- #
+# State: a per-plugin dir holding seen.json (badge tracking) + cache.json.
+# --------------------------------------------------------------------------- #
+def state_dir() -> Path:
     base = os.environ.get("SWIFTBAR_PLUGIN_DATA_PATH", "").strip()
     directory = Path(base) if base else REPO_DIR / "state"
     directory.mkdir(parents=True, exist_ok=True)
-    return directory / "seen.json"
+    return directory
 
 
 def load_seen() -> dict[str, str]:
-    path = state_path()
+    path = state_dir() / "seen.json"
     if not path.exists():
         return {}
     try:
@@ -71,15 +87,90 @@ def load_seen() -> dict[str, str]:
 def save_seen(prs: list[dict]) -> None:
     seen = {pr["url"]: pr["updated_at"] for pr in prs}
     try:
-        state_path().write_text(json.dumps(seen), encoding="utf-8")
+        (state_dir() / "seen.json").write_text(json.dumps(seen), encoding="utf-8")
     except OSError:
         pass  # state is best-effort; never break the menu over it
 
 
+def load_cache() -> dict | None:
+    path = state_dir() / "cache.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (ValueError, OSError):
+        return None
+
+
+def save_cache(prs: list[dict], error: str | None) -> None:
+    payload = {
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "prs": prs,
+        "error": error,
+    }
+    try:
+        (state_dir() / "cache.json").write_text(json.dumps(payload), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def cache_age(cache: dict | None) -> float | None:
+    if not cache or not cache.get("fetched_at"):
+        return None
+    try:
+        when = datetime.fromisoformat(cache["fetched_at"])
+        return (datetime.now(timezone.utc) - when).total_seconds()
+    except ValueError:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Fetching (network) — only ever runs in the detached --fetch child or on the
+# very first render when there's no cache yet.
+# --------------------------------------------------------------------------- #
+def fetch_and_cache(trigger_redraw: bool) -> None:
+    load_env()
+    try:
+        token = get_token()
+        prs = collect_prs(token)
+        save_cache(prs, error=None)
+    except DigestError as exc:
+        # Keep the last-good list; attach a one-line error so the menu can warn.
+        prev = load_cache() or {}
+        save_cache(prev.get("prs", []), error=str(exc).splitlines()[0])
+    if trigger_redraw:
+        trigger_refresh()
+
+
+def trigger_refresh() -> None:
+    try:
+        subprocess.Popen(
+            ["open", "-g", f"swiftbar://refreshplugin?plugin={PLUGIN_ID}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
+
+
+def kick_background_fetch() -> None:
+    """Spawn a fully detached `--fetch` so the menu render returns now."""
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--fetch"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------- #
+# Rendering (SwiftBar protocol)
+# --------------------------------------------------------------------------- #
 def sanitize(text: str) -> str:
     """SwiftBar uses `|` to separate text from params, and lines are records."""
-    cleaned = " ".join(text.split())  # collapse whitespace/newlines
-    return cleaned.replace("|", "¦")
+    return " ".join(text.split()).replace("|", "¦")
 
 
 def truncate(text: str, limit: int = TITLE_MAX) -> str:
@@ -87,13 +178,11 @@ def truncate(text: str, limit: int = TITLE_MAX) -> str:
 
 
 def is_new(pr: dict, seen: dict[str, str]) -> bool:
-    """New to the list, or updated since we last recorded it."""
     prev = seen.get(pr["url"])
     return prev is None or pr["updated_at"] > prev
 
 
 def emit(text: str = "", **params: str) -> None:
-    """Print one SwiftBar menu line: `text | k=v k=v`."""
     if params:
         param_str = " ".join(f"{k}={v}" for k, v in params.items() if v != "")
         print(f"{text} | {param_str}" if param_str else text)
@@ -101,12 +190,17 @@ def emit(text: str = "", **params: str) -> None:
         print(text)
 
 
-def render_menu(prs: list[dict], seen: dict[str, str]) -> None:
+def render_menu(prs: list[dict], seen: dict[str, str], *, spinner: bool,
+                error: str | None) -> None:
     new_prs = [pr for pr in prs if is_new(pr, seen)]
     count = len(prs)
 
     # --- menu bar title (single line) ---
-    if count == 0:
+    if spinner:
+        emit(str(count) if count else "", sfimage="arrow.triangle.2.circlepath")
+    elif error and not prs:
+        emit(sfimage="exclamationmark.triangle", sfcolor="orange")
+    elif count == 0:
         emit(sfimage="checkmark.circle", sfcolor="green")
     elif new_prs:
         emit(str(count), sfimage="tray.full.fill", sfcolor="red")
@@ -115,9 +209,17 @@ def render_menu(prs: list[dict], seen: dict[str, str]) -> None:
 
     print("---")
 
-    if count == 0:
+    if error:
+        emit("Couldn't refresh GitHub", sfimage="exclamationmark.triangle",
+             sfcolor="orange", color="#d08770")
+        emit(sanitize(error), color="#888888")
+        emit("Retry", bash=f'"{LAUNCHER}"', param1="--fetch", terminal="false",
+             sfimage="arrow.clockwise")
+        print("---")
+
+    if count == 0 and not error:
         emit("No PRs need your attention", color="#888888")
-    else:
+    elif count:
         emit(f"{count} PR(s) need your attention", color="#888888")
 
         if new_prs:
@@ -126,7 +228,6 @@ def render_menu(prs: list[dict], seen: dict[str, str]) -> None:
             for pr in sorted(new_prs, key=lambda p: p["age_days"], reverse=True):
                 pr_line(pr, new=True)
 
-        # Grouped by repo.
         by_repo: dict[str, list[dict]] = defaultdict(list)
         for pr in prs:
             by_repo[pr["repo"]].append(pr)
@@ -139,17 +240,23 @@ def render_menu(prs: list[dict], seen: dict[str, str]) -> None:
 
     # --- footer actions ---
     print("---")
-    emit("Refresh now", refresh="true", sfimage="arrow.clockwise")
-    emit(
-        "Mark all as seen",
-        bash=f'"{LAUNCHER}"',
-        param1="--mark-seen",
-        terminal="false",
-        refresh="true",
-        sfimage="eye",
-    )
-    now = datetime.now().astimezone()
-    emit(f"Updated {now:%H:%M}", color="#888888")
+    emit("Refresh now", bash=f'"{LAUNCHER}"', param1="--fetch", terminal="false",
+         sfimage="arrow.clockwise")
+    emit("Mark all as seen", bash=f'"{LAUNCHER}"', param1="--mark-seen",
+         terminal="false", refresh="true", sfimage="eye")
+    age = cache_label()
+    emit(f"Updated {age}", color="#888888")
+
+
+def cache_label() -> str:
+    cache = load_cache()
+    if not cache or not cache.get("fetched_at"):
+        return "—"
+    try:
+        when = datetime.fromisoformat(cache["fetched_at"]).astimezone()
+        return f"{when:%H:%M}"
+    except ValueError:
+        return "—"
 
 
 def pr_line(pr: dict, new: bool) -> None:
@@ -162,39 +269,46 @@ def pr_line(pr: dict, new: bool) -> None:
         emit(label, href=pr["url"])
 
 
-def render_error(exc: DigestError) -> None:
-    """Friendly menu instead of a traceback when something's wrong."""
-    emit("PR", sfimage="exclamationmark.triangle", sfcolor="orange")
-    print("---")
-    for line in str(exc).splitlines():
-        emit(sanitize(line.strip()) or " ", color="#888888")
-    print("---")
-    emit("Open setup instructions", href=f"file://{REPO_DIR / 'README.md'}")
-    emit("Retry", refresh="true", sfimage="arrow.clockwise")
-
-
+# --------------------------------------------------------------------------- #
 def main() -> int:
-    mark_seen_only = "--mark-seen" in sys.argv[1:]
+    args = sys.argv[1:]
     reason = os.environ.get("SWIFTBAR_PLUGIN_REFRESH_REASON", "")
 
     if os.environ.get("PR_DIGEST_DEMO"):
-        render_menu(DEMO_PRS, DEMO_SEEN)
+        render_menu(DEMO_PRS, DEMO_SEEN, spinner="--spinner" in args, error=None)
         return 0
 
-    load_env()
-    try:
-        token = get_token()
-        prs = collect_prs(token)
-    except DigestError as exc:
-        render_error(exc)
-        return 0  # exit 0 so SwiftBar shows our menu, not its error UI
-
-    if mark_seen_only:
-        save_seen(prs)
+    if "--fetch" in args:
+        fetch_and_cache(trigger_redraw=True)
         return 0
 
+    if "--mark-seen" in args:
+        cache = load_cache() or {}
+        save_seen(cache.get("prs", []))
+        return 0
+
+    # --- render mode: instant, from cache ---
+    cache = load_cache()
+    if cache is None:
+        # First ever run: nothing cached, so fetch inline this once.
+        fetch_and_cache(trigger_redraw=False)
+        cache = load_cache() or {"prs": [], "error": None}
+
+    prs = cache.get("prs", [])
+    error = cache.get("error")
+    age = cache_age(cache)
+
+    should_fetch = (
+        age is None
+        or age > STALE_TTL
+        or (reason == "MenuOpen" and age > MENU_DEBOUNCE)
+    )
+    if should_fetch:
+        kick_background_fetch()
+
+    spinner = should_fetch and reason == "MenuOpen"
     seen = load_seen()
-    render_menu(prs, seen)
+    render_menu(prs, seen, spinner=spinner, error=error)
 
     # Clear the "new" badge only after you've actually opened the menu.
     if reason == "MenuOpen":
