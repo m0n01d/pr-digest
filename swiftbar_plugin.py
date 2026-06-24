@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import defaultdict
@@ -246,6 +247,26 @@ def sanitize(text: str) -> str:
     return " ".join(text.split()).replace("|", "¦")
 
 
+def clean_body(text: str) -> str:
+    """Strip common Markdown from a comment so it reads as plain prose.
+    Line-based rules run before sanitize() collapses whitespace."""
+    t = text
+    t = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", t)        # ![alt](url) -> alt
+    t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)         # [text](url) -> text
+    t = re.sub(r"```[^\n]*", "", t)                         # ``` fences
+    t = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", t)            # # headings
+    t = re.sub(r"(?m)^\s{0,3}>\s?", "", t)                 # > blockquotes
+    t = re.sub(r"(?m)^\s*[-*+]\s+", "• ", t)               # list bullets
+    t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)               # **bold**
+    t = re.sub(r"__([^_]+)__", r"\1", t)                   # __bold__
+    t = re.sub(r"\*([^*\n]+)\*", r"\1", t)                 # *italic*
+    t = re.sub(r"(?<![\w_])_([^_\n]+)_(?![\w_])", r"\1", t)  # _italic_ (not snake_case)
+    t = re.sub(r"~~([^~]+)~~", r"\1", t)                   # ~~strike~~
+    t = t.replace("`", "")                                 # inline code ticks
+    t = re.sub(r"<!--.*?-->", "", t, flags=re.S)           # html comments
+    return sanitize(t)
+
+
 def truncate(text: str, limit: int = TITLE_MAX) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
@@ -351,7 +372,7 @@ def pr_block(pr: dict, seen: dict[str, str]) -> None:
     if count:
         params["badge"] = str(count)
     if latest:
-        params["tooltip"] = sanitize(latest["body"])
+        params["tooltip"] = clean_body(latest["body"])
     if is_new(pr, seen):
         params["sfimage"], params["sfcolor"] = "circle.fill", "red"
     else:
@@ -362,9 +383,10 @@ def pr_block(pr: dict, seen: dict[str, str]) -> None:
     for c in comments[:2]:
         glyph = ("chevron.left.forwardslash.chevron.right"
                  if c["type"] == "review" else "arrowshape.turn.up.left")
-        line = f"{c['author']}  {truncate(sanitize(c['body']), 46)} · {humanize(c['created_at'])}"
+        body = clean_body(c["body"])
+        line = f"{c['author']}  {truncate(body, 46)} · {humanize(c['created_at'])}"
         cp: dict[str, str] = {"href": c["html_url"], "sfimage": glyph,
-                              "tooltip": sanitize(c["body"])}
+                              "tooltip": body}
         if c["created_at"] <= seen_ts:  # already seen → muted
             cp["color"] = "#8b8b90"
         emit(line, **cp)
