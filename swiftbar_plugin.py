@@ -336,8 +336,11 @@ def pr_block(pr: dict, seen: dict[str, str]) -> None:
     age = "today" if pr["age_days"] == 0 else f"{pr['age_days']}d"
 
     # --- the PR row ---
+    # Show the latest replier only when it's someone other than the PR author,
+    # otherwise the same name appears twice (author + replier). The newest reply
+    # is line 1 below regardless.
     summary = ""
-    if latest:
+    if latest and latest["author"] != pr["author"]:
         summary = f"  ·  {latest['author']} {humanize(latest['created_at'])}"
     label = f"#{pr['number']}  {truncate(sanitize(pr['title']), 44)}  ·  {pr['author']} · {age}{summary}"
     params: dict[str, str] = {"href": pr["url"]}
