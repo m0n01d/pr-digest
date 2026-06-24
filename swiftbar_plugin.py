@@ -256,11 +256,19 @@ def is_new(pr: dict, seen: dict[str, str]) -> bool:
 
 
 def emit(text: str = "", **params: str) -> None:
-    if params:
-        param_str = " ".join(f"{k}={v}" for k, v in params.items() if v != "")
-        print(f"{text} | {param_str}" if param_str else text)
-    else:
-        print(text)
+    parts = []
+    for key, value in params.items():
+        value = str(value)
+        if value == "":
+            continue
+        # SwiftBar splits params on spaces, so any value containing a space
+        # must be quoted — otherwise it's cut at the first space (e.g. a
+        # tooltip showing only the first word).
+        if " " in value or '"' in value:
+            parts.append(f'{key}="{value.replace(chr(34), chr(39))}"')
+        else:
+            parts.append(f"{key}={value}")
+    print(f"{text} | {' '.join(parts)}" if parts else text)
 
 
 def render_menu(prs: list[dict], seen: dict[str, str], *, spinner: bool,
@@ -286,7 +294,7 @@ def render_menu(prs: list[dict], seen: dict[str, str], *, spinner: bool,
         emit("Couldn't refresh GitHub", sfimage="exclamationmark.triangle",
              sfcolor="orange", color="#d08770")
         emit(sanitize(error), color="#888888")
-        emit("Retry", bash=f'"{LAUNCHER}"', param1="--fetch", terminal="false",
+        emit("Retry", bash=str(LAUNCHER), param1="--fetch", terminal="false",
              sfimage="arrow.clockwise")
         print("---")
 
@@ -306,9 +314,9 @@ def render_menu(prs: list[dict], seen: dict[str, str], *, spinner: bool,
 
     # --- footer actions ---
     print("---")
-    emit("Refresh now", bash=f'"{LAUNCHER}"', param1="--fetch", terminal="false",
+    emit("Refresh now", bash=str(LAUNCHER), param1="--fetch", terminal="false",
          sfimage="arrow.clockwise")
-    emit("Mark all as seen", bash=f'"{LAUNCHER}"', param1="--mark-seen",
+    emit("Mark all as seen", bash=str(LAUNCHER), param1="--mark-seen",
          terminal="false", refresh="true", sfimage="eye")
     age = cache_label()
     emit(f"Updated {age}", color="#888888")
@@ -343,7 +351,7 @@ def pr_block(pr: dict, seen: dict[str, str]) -> None:
     if count:
         params["badge"] = str(count)
     if latest:
-        params["tooltip"] = sanitize(latest["body"])[:200]
+        params["tooltip"] = sanitize(latest["body"])
     if is_new(pr, seen):
         params["sfimage"], params["sfcolor"] = "circle.fill", "red"
     else:
@@ -356,7 +364,7 @@ def pr_block(pr: dict, seen: dict[str, str]) -> None:
                  if c["type"] == "review" else "arrowshape.turn.up.left")
         line = f"{c['author']}  {truncate(sanitize(c['body']), 46)} · {humanize(c['created_at'])}"
         cp: dict[str, str] = {"href": c["html_url"], "sfimage": glyph,
-                              "tooltip": sanitize(c["body"])[:280]}
+                              "tooltip": sanitize(c["body"])}
         if c["created_at"] <= seen_ts:  # already seen → muted
             cp["color"] = "#8b8b90"
         emit(line, **cp)
