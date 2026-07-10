@@ -194,14 +194,18 @@ def _auth_headers(token: str) -> dict:
     }
 
 
-def _get_list(url: str, token: str) -> list[dict]:
-    """GET a JSON array endpoint with the shared error handling."""
+def _get(url: str, token: str):
+    """GET a JSON endpoint with the shared error handling; returns parsed JSON."""
     try:
         resp = requests.get(url, headers=_auth_headers(token), timeout=TIMEOUT)
     except requests.RequestException as exc:
         raise DigestError(f"Network error talking to GitHub: {exc}") from exc
     _raise_for_api_errors(resp)
-    payload = resp.json()
+    return resp.json()
+
+
+def _get_list(url: str, token: str) -> list[dict]:
+    payload = _get(url, token)
     return payload if isinstance(payload, list) else []
 
 
@@ -251,9 +255,34 @@ def fetch_comments(token: str, repo: str, number: int) -> dict:
     return {"comments": merged[:5], "count": len(merged)}
 
 
-def attach_comments(token: str, prs: list[dict]) -> list[dict]:
-    """Enrich each PR in place with its recent comments. Per-PR errors are
-    swallowed so one bad PR can't blank the whole digest."""
+def fetch_pr_status(token: str, repo: str, number: int) -> dict:
+    """Review + mergeability status for one PR:
+    {approved, changes_requested, conflicts, draft}."""
+    obj = _get(f"{API_ROOT}/repos/{repo}/pulls/{number}", token)
+    obj = obj if isinstance(obj, dict) else {}
+    # mergeable is computed async; None = unknown → don't claim a conflict.
+    conflicts = obj.get("mergeable") is False or obj.get("mergeable_state") == "dirty"
+
+    reviews = _get_list(
+        f"{API_ROOT}/repos/{repo}/pulls/{number}/reviews?per_page=100", token)
+    # Keep the last decisive review per reviewer (reviews come chronologically).
+    latest: dict[str, str] = {}
+    for r in reviews:
+        state = r.get("state")
+        if state in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            latest[(r.get("user") or {}).get("login", "")] = state
+    states = set(latest.values())
+    return {
+        "approved": "APPROVED" in states and "CHANGES_REQUESTED" not in states,
+        "changes_requested": "CHANGES_REQUESTED" in states,
+        "conflicts": bool(conflicts),
+        "draft": bool(obj.get("draft")),
+    }
+
+
+def enrich_prs(token: str, prs: list[dict]) -> list[dict]:
+    """Enrich each PR in place with recent comments + review/merge status.
+    Per-PR errors are swallowed so one bad PR can't blank the whole digest."""
     for pr in prs:
         try:
             data = fetch_comments(token, pr["repo"], pr["number"])
@@ -262,4 +291,8 @@ def attach_comments(token: str, prs: list[dict]) -> list[dict]:
         pr["comments"] = data["comments"]
         pr["comment_count"] = data["count"]
         pr["latest"] = data["comments"][0] if data["comments"] else None
+        try:
+            pr["status"] = fetch_pr_status(token, pr["repo"], pr["number"])
+        except DigestError:
+            pr["status"] = {}
     return prs

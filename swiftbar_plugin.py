@@ -32,7 +32,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from gh_prs import (DigestError, attach_comments, collect_prs, get_token,
+from gh_prs import (DigestError, collect_prs, enrich_prs, get_token,
                     humanize, load_env)
 
 REPO_DIR = Path(__file__).resolve().parent
@@ -82,6 +82,9 @@ def demo_data() -> tuple[list[dict], dict[str, str]]:
              "html_url": "https://github.com/acme/api/pull/88#c2",
              "body": "CI is green now."}]},
     ]
+    # #142 approved, #88 has merge conflicts, #137 nothing notable.
+    prs[0]["status"] = {"approved": True, "conflicts": False}
+    prs[2]["status"] = {"approved": False, "conflicts": True}
     for pr in prs:
         pr["latest"] = pr["comments"][0] if pr["comments"] else None
     # #137 already seen (calm); #142 & #88 have unread replies.
@@ -205,7 +208,7 @@ def fetch_and_cache(trigger_redraw: bool) -> None:
     try:
         token = get_token()
         prs = collect_prs(token)
-        attach_comments(token, prs)  # enrich with recent comments
+        enrich_prs(token, prs)  # recent comments + review/merge status
         save_cache(prs, error=None)
     except DigestError as exc:
         # Keep the last-good list; attach a one-line error so the menu can warn.
@@ -366,8 +369,15 @@ def pr_block(pr: dict, seen: dict[str, str]) -> None:
 
     # --- the PR row ---
     # Just the PR author here — the latest replier already shows as the first
-    # comment line below, so repeating it on the row is redundant.
-    label = f"#{pr['number']}  {truncate(sanitize(pr['title']), 48)}  ·  {pr['author']} · {age}"
+    # comment line below, so repeating it on the row is redundant. A leading
+    # status glyph flags approved (✅) / merge conflicts (⚠️).
+    status = pr.get("status") or {}
+    marks = ""
+    if status.get("approved"):
+        marks += "✅ "
+    if status.get("conflicts"):
+        marks += "⚠️ "
+    label = f"#{pr['number']}  {marks}{truncate(sanitize(pr['title']), 46)}  ·  {pr['author']} · {age}"
     params: dict[str, str] = {"href": pr["url"]}
     if count:
         params["badge"] = str(count)
