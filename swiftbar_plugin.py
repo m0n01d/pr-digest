@@ -378,6 +378,8 @@ def pr_block(pr: dict, seen: dict[str, str]) -> None:
         marks += "🚧 "
     if status.get("approved"):
         marks += "✅ "
+    if status.get("changes_requested"):
+        marks += "✏️ "
     if status.get("conflicts"):
         marks += "⚠️ "
     label = f"#{pr['number']}  {marks}{truncate(sanitize(pr['title']), 46)}  ·  {pr['author']} · {age}"
