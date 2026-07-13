@@ -82,8 +82,9 @@ def demo_data() -> tuple[list[dict], dict[str, str]]:
              "html_url": "https://github.com/acme/api/pull/88#c2",
              "body": "CI is green now."}]},
     ]
-    # #142 approved, #88 has merge conflicts, #137 nothing notable.
+    # #142 approved, #88 has merge conflicts, #137 is a draft.
     prs[0]["status"] = {"approved": True, "conflicts": False}
+    prs[1]["status"] = {"draft": True}
     prs[2]["status"] = {"approved": False, "conflicts": True}
     for pr in prs:
         pr["latest"] = pr["comments"][0] if pr["comments"] else None
@@ -373,6 +374,8 @@ def pr_block(pr: dict, seen: dict[str, str]) -> None:
     # status glyph flags approved (✅) / merge conflicts (⚠️).
     status = pr.get("status") or {}
     marks = ""
+    if status.get("draft"):
+        marks += "🚧 "
     if status.get("approved"):
         marks += "✅ "
     if status.get("conflicts"):

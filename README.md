@@ -135,8 +135,8 @@ and **Refresh now** to re-fetch on demand.
 Each PR row also previews its recent **comments** — conversation replies and
 inline review comments — so you can see who responded without opening GitHub:
 
-- The PR row shows the author, a **comment-count badge**, and a **status glyph**
-  — ✅ when the PR is approved, ⚠️ when it has merge conflicts (both if both).
+- The PR row shows the author, a **comment-count badge**, and **status glyphs**
+  — 🚧 draft, ✅ approved, ⚠️ merge conflicts (combined if more than one applies).
 - Up to **2** recent comments appear beneath it; review comments carry a code
   glyph, replies a reply glyph. Click one to jump straight to that comment.
 - **+n more on GitHub** opens the PR's conversation tab; PRs with none show
