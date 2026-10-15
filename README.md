@@ -115,6 +115,11 @@ It reuses the same `.env` token as the CLI, so no extra setup. The plugin
 (`swiftbar_plugin.py`, launched by `swiftbar-plugins/prdigest.1h.sh`) shares the
 fetch code in `gh_prs.py`.
 
+**More menu bar tools** live in the same plugin folder, so SwiftBar picks them up with no extra setup:
+
+- [`review-drafter/`](review-drafter/): auto code review. Click a PR in the menu and Claude drafts a *pending* GitHub review that only you can see. Needs a logged-in `claude` CLI.
+- [`claude-heartbeat/`](claude-heartbeat/): shows whether each Claude Code session is working, stalled, or idle. Run `claude-heartbeat/install.sh` once.
+
 **Reading the icon:**
 
 | Menu bar | Meaning |
@@ -242,6 +247,9 @@ The tool exits non-zero with a clear message on:
 | `pr_digest.py` | The CLI — prints the digest and writes the dated file. |
 | `swiftbar_plugin.py` | The SwiftBar menu renderer + "seen" state. |
 | `swiftbar-plugins/prdigest.1h.sh` | SwiftBar launcher (hourly + refresh-on-open). |
+| `review-drafter/` | Auto code review menu + engine (see its README). |
+| `claude-heartbeat/` | Claude session status menu + hook (see its README). |
+| `swiftbar-plugins/prreviews.30m.sh`, `claude-heartbeat.5s.sh` | Launchers for the two tools above. |
 | `run` | Wrapper for cron/launchd (activates venv, fixes cwd). |
 | `requirements.txt` | `requests`, `python-dotenv`. |
 | `.env.example` | Template — copy to `.env`. |
